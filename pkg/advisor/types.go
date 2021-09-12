@@ -21,9 +21,9 @@ type suggestion struct {
 	Message   string
 }
 
-type podResources struct {
-	LimitCPU   *float64
-	LimitMem   *float64
-	RequestCPU *float64
-	RequestMem *float64
+type prometheusMetrics struct {
+	LimitCPU   map[string]float64
+	LimitMem   map[string]float64
+	RequestCPU map[string]float64
+	RequestMem map[string]float64
 }
