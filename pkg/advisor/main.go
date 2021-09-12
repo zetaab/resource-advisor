@@ -10,6 +10,7 @@ import (
 	"github.com/olekukonko/tablewriter"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
+	apresource "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -36,6 +37,9 @@ func Run(o *Options) error {
 
 	ctx := context.Background()
 	data := [][]string{}
+
+	totalCPUSave := float64(0.00)
+	totalMemSave := float64(0.00)
 	for _, namespace := range strings.Split(o.Namespaces, ",") {
 		deployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
@@ -118,7 +122,11 @@ func Run(o *Options) error {
 				final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
 			}
 
-			data = o.analyzeDeployment(data, namespace, deployment, final)
+			cpuSave := float64(0.00)
+			memSave := float64(0.00)
+			data, cpuSave, memSave = o.analyzeDeployment(data, namespace, deployment, final)
+			totalCPUSave += cpuSave
+			totalMemSave += memSave
 		}
 	}
 
@@ -129,34 +137,65 @@ func Run(o *Options) error {
 	}
 	table.Render()
 
+	fmt.Printf("Total savings:\n")
+
+	totalMem := int64(totalMemSave)
+	totalMemStr := ByteCountSI(totalMem)
+	if totalMem < 0 {
+		totalMem *= -1
+		totalMemStr = ByteCountSI(totalMem)
+		totalMemStr = fmt.Sprintf("-%s", totalMemStr)
+	}
+	fmt.Printf("You could save %.2f vCPUs and %s Memory by changing the settings\n", totalCPUSave, totalMemStr)
+
 	return nil
 }
 
-func currentValue(resources v1.ResourceRequirements, method string, resource v1.ResourceName) string {
+func currentValue(resources v1.ResourceRequirements, method string, resource v1.ResourceName, current int, format apresource.Format) (float64, string) {
+	curSaving := float64(float64(current) * 1000 * 1000)
+	if format == apresource.DecimalSI {
+		curSaving = float64(float64(current) / 1000)
+	}
+
 	if method == "limit" {
 		val, ok := resources.Limits[resource]
 		if ok {
-			return val.String()
+			return val.AsApproximateFloat64() - curSaving, val.String()
+		}
+	} else {
+		val, ok := resources.Requests[resource]
+		if ok {
+			return val.AsApproximateFloat64() - curSaving, val.String()
 		}
 	}
-	return "<nil>"
+	return -1*curSaving, "<nil>"
 }
 
-func (o *Options) analyzeDeployment(data [][]string, namespace string, deployment appsv1.Deployment, finalMetrics prometheusMetrics) [][]string {
+func (o *Options) analyzeDeployment(data [][]string, namespace string, deployment appsv1.Deployment, finalMetrics prometheusMetrics) ([][]string, float64, float64) {
+	totalCPUSavings := float64(0.00)
+	totalMemSavings := float64(0.00)
 	for _, container := range deployment.Spec.Template.Spec.Containers {
-		reqCpu, _ := finalMetrics.RequestCPU[container.Name]
-		reqMem, _ := finalMetrics.RequestMem[container.Name]
-		limCpu, _ := finalMetrics.LimitCPU[container.Name]
-		limMem, _ := finalMetrics.LimitMem[container.Name]
+		reqCpu := int(finalMetrics.RequestCPU[container.Name] * 1000)
+		reqMem := int(finalMetrics.RequestMem[container.Name])
+		limCpu := int(finalMetrics.LimitCPU[container.Name] * 1000)
+		limMem := int(finalMetrics.LimitMem[container.Name])
+
+		reqCpuSave, strReqCPU := currentValue(container.Resources, "request", v1.ResourceCPU, reqCpu, apresource.DecimalSI)
+		reqMemSave, strReqMem := currentValue(container.Resources, "request", v1.ResourceMemory, reqMem, apresource.BinarySI)
+		_, strLimCPU := currentValue(container.Resources, "limit", v1.ResourceCPU, limCpu, apresource.DecimalSI)
+		_, strLimMem := currentValue(container.Resources, "limit", v1.ResourceMemory, limMem, apresource.BinarySI)
+
+		totalCPUSavings += reqCpuSave * float64(*deployment.Spec.Replicas)
+		totalMemSavings += reqMemSave * float64(*deployment.Spec.Replicas)
 		data = append(data, []string{
 			namespace,
 			deployment.Name,
 			container.Name,
-			fmt.Sprintf("%dm (%s)", int(reqCpu*1000), currentValue(container.Resources, "request", v1.ResourceCPU)),
-			fmt.Sprintf("%dMi (%s)", int(reqMem), currentValue(container.Resources, "request", v1.ResourceMemory)),
-			fmt.Sprintf("%dm (%s)", int(limCpu*1000), currentValue(container.Resources, "limit", v1.ResourceCPU)),
-			fmt.Sprintf("%dMi (%s)", int(limMem), currentValue(container.Resources, "limit", v1.ResourceMemory)),
+			fmt.Sprintf("%dm (%s)", reqCpu, strReqCPU),
+			fmt.Sprintf("%dMi (%s)", reqMem, strReqMem),
+			fmt.Sprintf("%dm (%s)", limCpu, strLimCPU),
+			fmt.Sprintf("%dMi (%s)", limMem, strLimMem),
 		})
 	}
-	return data
+	return data, totalCPUSavings, totalMemSavings
 }
