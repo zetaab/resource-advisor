@@ -1,32 +1,35 @@
 package advisor
 
 import (
-	"fmt"
 	"context"
-	"io/ioutil"
-	"net/http"
-	"time"
-	"net/url"
-	"path"
-	"strings"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"path"
+	"strconv"
+	"strings"
+	"time"
 
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/api/core/v1"
-	"k8s.io/client-go/rest"
 	promv1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	prommodel "github.com/prometheus/common/model"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/api/core/v1"
+	apiResource "k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
 	promOperatorClusterURL = "/api/v1/namespaces/monitoring/services/prometheus-operated:web/proxy/"
-	podCPURequest = `avg_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container="%s"}[1w])`
-	podCPULimit = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container="%s"}[1w]) * 1.2`
-	podMemoryRequest = `avg_over_time(container_memory_working_set_bytes{pod="%s", container="%s"}[1w]) / 1024 / 1024`
-	podMemoryLimit = `(max_over_time(container_memory_working_set_bytes{pod="%s", container="%s"}[1w]) / 1024 / 1024) * 1.2`
-
+	podCPURequest          = `avg_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w])`
+	podCPULimit            = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w]) * 1.2`
+	podMemoryRequest       = `avg_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w])`
+	podMemoryLimit         = `(max_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w])) * 1.2`
+	deploymentRevision     = "deployment.kubernetes.io/revision"
 )
 
 func findConfig() (*rest.Config, error) {
@@ -41,64 +44,211 @@ func newClientSet() (*kubernetes.Clientset, error) {
 	return kubernetes.NewForConfig(config)
 }
 
-func getCurrentValue(quantityMap v1.ResourceList, key v1.ResourceName) *float64 {
-	if val, ok := quantityMap[key]; ok {
+func getCurrentValue(quantityMap v1.ResourceRequirements) podResources {
+	resources := podResources{}
+	if val, ok := quantityMap.Requests[v1.ResourceCPU]; ok {
 		currentValue := &val
 		asApproximateFloat64 := currentValue.AsApproximateFloat64()
-		return &asApproximateFloat64
+		resources.RequestCPU = &asApproximateFloat64
 	}
-	return nil
+	if val, ok := quantityMap.Limits[v1.ResourceCPU]; ok {
+		currentValue := &val
+		asApproximateFloat64 := currentValue.AsApproximateFloat64()
+		resources.LimitCPU = &asApproximateFloat64
+	}
+	if val, ok := quantityMap.Requests[v1.ResourceMemory]; ok {
+		currentValue := &val
+		asApproximateFloat64 := currentValue.AsApproximateFloat64()
+		resources.RequestMem = &asApproximateFloat64
+	}
+	if val, ok := quantityMap.Limits[v1.ResourceMemory]; ok {
+		currentValue := &val
+		asApproximateFloat64 := currentValue.AsApproximateFloat64()
+		resources.LimitMem = &asApproximateFloat64
+	}
+	return resources
 }
 
-func queryPrometheusForPod(ctx context.Context, client *promClient, pod v1.Pod) error {
+func queryStatistic(ctx context.Context, client *promClient, request string, now time.Time) (map[string]prommodel.SampleValue, error) {
+	output := make(map[string]prommodel.SampleValue)
+	response, _, err := queryPrometheus(ctx, client, request, now)
+	if err != nil {
+		return output, fmt.Errorf("Error querying statistic %v", err)
+	}
+	asSamples := response.(prommodel.Vector)
+
+	sampleArray := []*prommodel.Sample{}
+	for _, sample := range asSamples {
+		sampleArray = append(sampleArray, sample)
+	}
+
+	for _, item := range sampleArray {
+		containerName := ""
+		for k, v := range item.Metric {
+			if k == "container" {
+				containerName = string(v)
+				break
+			}
+		}
+		output[containerName] = item.Value
+	}
+
+	return output, nil
+}
+
+func makeSuggestion(output []suggestion, podName string, containerName string, text string, currrentUsage prommodel.SampleValue, currentResource *float64, mode int) []suggestion {
+	usage := float64(currrentUsage)
+	resource := asFloat(currentResource)
+
+	// if usage is >20% lower
+	if usage < resource && (usage*100/resource) < 80 {
+		output = append(output, suggestion{
+			Pod:       podName,
+			Container: containerName,
+			Message:   fmt.Sprintf("Decrease %s", text),
+			OldValue:  resource,
+			NewValue:  usage,
+		})
+	}
+
+	// if usage is >10% higher
+	if usage > resource && (usage*100/resource) > 110 {
+		output = append(output, suggestion{
+			Pod:       podName,
+			Container: containerName,
+			Message:   fmt.Sprintf("Increase %s", text),
+			OldValue:  resource,
+			NewValue:  usage,
+		})
+	}
+	return output
+}
+
+func queryPrometheusForPod(ctx context.Context, client *promClient, pod v1.Pod) ([]suggestion, error) {
 	now := time.Now()
-	for _, container := range pod.Spec.Containers {
-		//suggestions := []suggestion{}
-		respCPURequest, _, err := queryPrometheus(ctx, client, fmt.Sprintf(podCPURequest, pod.Name, container.Name), now)
-		if err != nil {
-			return fmt.Errorf("Error podCPURequest %v", err)
-		}
-		asCPUReqSample := respCPURequest.(prommodel.Vector)[0]
 
-		curValue := getCurrentValue(container.Resources.Requests, v1.ResourceCPU)
-		fmt.Printf("pod cpu request %s %s %+v %s\n", pod.Name, container.Name, asCPUReqSample.Value, asFloat(curValue))
+	suggestions := []suggestion{}
 
-		respCPULimit, _, err := queryPrometheus(ctx, client, fmt.Sprintf(podCPULimit, pod.Name, container.Name), now)
-		if err != nil {
-			return fmt.Errorf("Error podCPURequest %v", err)
-		}
-		asCPULimitSample := respCPULimit.(prommodel.Vector)[0]
-
-		curValue = getCurrentValue(container.Resources.Limits, v1.ResourceCPU)
-		fmt.Printf("pod cpu limit %s %s %+v %s\n", pod.Name, container.Name, asCPULimitSample.Value, asFloat(curValue))
-
-		respMemRequest, _, err := queryPrometheus(ctx, client, fmt.Sprintf(podMemoryRequest, pod.Name, container.Name), now)
-		if err != nil {
-			return fmt.Errorf("Error respMemRequest %v", err)
-		}
-		asMemReqSample := respMemRequest.(prommodel.Vector)[0]
-
-		curValue = getCurrentValue(container.Resources.Requests, v1.ResourceMemory)
-		fmt.Printf("pod mem request %s %s %sMi %s\n", pod.Name, container.Name, asMemReqSample.Value, asFloat(curValue))
-
-		respMemLimit, _, err := queryPrometheus(ctx, client, fmt.Sprintf(podMemoryLimit, pod.Name, container.Name), now)
-		if err != nil {
-			return fmt.Errorf("Error respMemLimit %v", err)
-		}
-		asMemLimitSample := respMemLimit.(prommodel.Vector)[0]
-
-		curValue = getCurrentValue(container.Resources.Limits, v1.ResourceMemory)
-		fmt.Printf("pod mem limit %s %s %sMi %s\n", pod.Name, container.Name, asMemLimitSample.Value, asFloat(curValue))
-		fmt.Printf("\n\n")
+	podCPURequests, err := queryStatistic(ctx, client, fmt.Sprintf(podCPURequest, pod.Name), now)
+	if err != nil {
+		return nil, err
 	}
-	return nil
+
+	podCPULimits, err := queryStatistic(ctx, client, fmt.Sprintf(podCPULimit, pod.Name), now)
+	if err != nil {
+		return nil, err
+	}
+
+	podMemRequests, err := queryStatistic(ctx, client, fmt.Sprintf(podMemoryRequest, pod.Name), now)
+	if err != nil {
+		return nil, err
+	}
+
+	podMemLimits, err := queryStatistic(ctx, client, fmt.Sprintf(podMemoryLimit, pod.Name), now)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, container := range pod.Spec.Containers {
+		currentResources := getCurrentValue(container.Resources)
+		if currentResources.RequestCPU == nil {
+			suggestions = append(suggestions, suggestion{
+				Pod:       pod.Name,
+				Container: container.Name,
+				Message:   "Define CPU Requests",
+			})
+		} else {
+			val, ok := podCPURequests[container.Name]
+			if ok {
+				suggestions = makeSuggestion(suggestions, pod.Name, container.Name, "CPU Requests", val, currentResources.RequestCPU, 0)
+			} else {
+				suggestions = append(suggestions, suggestion{
+					Pod:       pod.Name,
+					Container: container.Name,
+					Message:   "Could not find CPU Requests from prometheus",
+				})
+			}
+		}
+
+		if currentResources.RequestMem == nil {
+			suggestions = append(suggestions, suggestion{
+				Pod:       pod.Name,
+				Container: container.Name,
+				Message:   "Define Memory Requests",
+			})
+		} else {
+			val, ok := podMemRequests[container.Name]
+			if ok {
+				suggestions = makeSuggestion(suggestions, pod.Name, container.Name, "Memory Requests", val, currentResources.RequestMem, 1)
+			} else {
+				suggestions = append(suggestions, suggestion{
+					Pod:       pod.Name,
+					Container: container.Name,
+					Message:   "Could not find Memory Requests from prometheus",
+				})
+			}
+		}
+
+		if currentResources.LimitCPU == nil {
+			suggestions = append(suggestions, suggestion{
+				Pod:       pod.Name,
+				Container: container.Name,
+				Message:   "Define CPU Limits",
+			})
+		} else {
+			val, ok := podCPULimits[container.Name]
+			if ok {
+				suggestions = makeSuggestion(suggestions, pod.Name, container.Name, "CPU Limits", val, currentResources.LimitCPU, 0)
+			} else {
+				suggestions = append(suggestions, suggestion{
+					Pod:       pod.Name,
+					Container: container.Name,
+					Message:   "Could not find CPU Limits from prometheus",
+				})
+			}
+		}
+
+		if currentResources.LimitMem == nil {
+			suggestions = append(suggestions, suggestion{
+				Pod:       pod.Name,
+				Container: container.Name,
+				Message:   "Define Memory Limits",
+			})
+		} else {
+			val, ok := podMemLimits[container.Name]
+			if ok {
+				suggestions = makeSuggestion(suggestions, pod.Name, container.Name, "Memory Limits", val, currentResources.LimitMem, 1)
+			} else {
+				suggestions = append(suggestions, suggestion{
+					Pod:       pod.Name,
+					Container: container.Name,
+					Message:   "Could not find Memory Limits from prometheus",
+				})
+			}
+		}
+	}
+	return suggestions, nil
 }
 
-func asFloat(val *float64) string {
+func asFloat(val *float64) float64 {
 	if val == nil {
-		return "<nil>"
+		return 0.00
 	}
-	return fmt.Sprintf("%f", *val)
+	return *val
+}
+
+func asPointer(input apiResource.Quantity) *apiResource.Quantity {
+	return &input
+}
+
+func findReplicaset(replicasets *appsv1.ReplicaSetList, generation int64) (*appsv1.ReplicaSet, error) {
+	for _, replicaset := range replicasets.Items {
+		val, ok := replicaset.Annotations[deploymentRevision]
+		if ok && val == strconv.FormatInt(generation, 10) {
+			return &replicaset, nil
+		}
+	}
+	return nil, fmt.Errorf("could not find replicaset")
 }
 
 func makePrometheusClientForCluster() (*promClient, error) {

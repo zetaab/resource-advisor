@@ -30,4 +30,4 @@ run: build
 
 build:
 	rm -f bin/$(BINARY_NAME)
-	GO111MODULE=on go build -v  -o bin/$(BINARY_NAME) ./cmd
+	GO111MODULE=on go build -v -o bin/$(BINARY_NAME) ./cmd

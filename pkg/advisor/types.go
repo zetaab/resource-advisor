@@ -6,7 +6,6 @@ import (
 )
 
 type Options struct {
-
 }
 
 type promClient struct {
@@ -15,6 +14,16 @@ type promClient struct {
 }
 
 type suggestion struct {
-	oldValue interface{}
-	newValue interface{}
+	OldValue  float64
+	NewValue  float64
+	Pod       string
+	Container string
+	Message   string
+}
+
+type podResources struct {
+	LimitCPU   *float64
+	LimitMem   *float64
+	RequestCPU *float64
+	RequestMem *float64
 }
