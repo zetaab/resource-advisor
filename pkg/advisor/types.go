@@ -6,6 +6,9 @@ import (
 )
 
 type Options struct {
+	Namespaces  string
+	Quantile    string
+	LimitMargin string
 }
 
 type promClient struct {

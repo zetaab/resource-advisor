@@ -23,10 +23,10 @@ import (
 
 const (
 	promOperatorClusterURL = "/api/v1/namespaces/monitoring/services/prometheus-operated:web/proxy/"
-	podCPURequest          = `avg_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w])`
-	podCPULimit            = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w]) * 1.2`
-	podMemoryRequest       = `avg_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024`
-	podMemoryLimit         = `(max_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024) * 1.2`
+	podCPURequest          = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w])`
+	podCPULimit            = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w]) * %s`
+	podMemoryRequest       = `quantile_over_time(%s, container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024`
+	podMemoryLimit         = `(max_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024) * %s`
 	deploymentRevision     = "deployment.kubernetes.io/revision"
 )
 
@@ -69,27 +69,27 @@ func queryStatistic(ctx context.Context, client *promClient, request string, now
 	return output, nil
 }
 
-func queryPrometheusForPod(ctx context.Context, client *promClient, pod v1.Pod) (prometheusMetrics, error) {
+func (o *Options) queryPrometheusForPod(ctx context.Context, client *promClient, pod v1.Pod) (prometheusMetrics, error) {
 	now := time.Now()
 	var err error
 
 	output := prometheusMetrics{}
-	output.RequestCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPURequest, pod.Name), now)
+	output.RequestCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPURequest, o.Quantile, pod.Name), now)
 	if err != nil {
 		return output, err
 	}
 
-	output.LimitCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPULimit, pod.Name), now)
+	output.LimitCPU, err = queryStatistic(ctx, client, fmt.Sprintf(podCPULimit, pod.Name, o.LimitMargin), now)
 	if err != nil {
 		return output, err
 	}
 
-	output.RequestMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryRequest, pod.Name), now)
+	output.RequestMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryRequest, o.Quantile, pod.Name), now)
 	if err != nil {
 		return output, err
 	}
 
-	output.LimitMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryLimit, pod.Name), now)
+	output.LimitMem, err = queryStatistic(ctx, client, fmt.Sprintf(podMemoryLimit, pod.Name, o.LimitMargin), now)
 	if err != nil {
 		return output, err
 	}
