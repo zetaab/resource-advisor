@@ -30,12 +30,24 @@ const (
 	deploymentRevision     = "deployment.kubernetes.io/revision"
 )
 
-func findConfig() (*rest.Config, error) {
-	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
+func findConfig() (*rest.Config, string, error) {
+	cfg, err := clientcmd.NewDefaultClientConfigLoadingRules().Load()
+	if err != nil {
+		return nil, "", err
+	}
+	namespace := ""
+	for k, v := range cfg.Contexts {
+		if cfg.CurrentContext == k {
+			namespace = v.Namespace
+			break
+		}
+	}
+	conf, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{}).ClientConfig()
+	return conf, namespace, err
 }
 
 func newClientSet() (*kubernetes.Clientset, error) {
-	config, err := findConfig()
+	config, _, err := findConfig()
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +132,7 @@ func findReplicaset(replicasets *appsv1.ReplicaSetList, dep appsv1.Deployment) (
 }
 
 func makePrometheusClientForCluster() (*promClient, error) {
-	config, err := findConfig()
+	config, _, err := findConfig()
 	if err != nil {
 		return nil, err
 	}

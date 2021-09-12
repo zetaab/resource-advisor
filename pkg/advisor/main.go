@@ -24,6 +24,16 @@ func Run(o *Options) error {
 		return err
 	}
 
+	if o.NamespaceInput == "" {
+		_, namespace, err := findConfig()
+		if err != nil {
+			return err
+		}
+		o.Namespaces = namespace
+	} else {
+		o.Namespaces = o.NamespaceInput
+	}
+
 	ctx := context.Background()
 	data := [][]string{}
 	for _, namespace := range strings.Split(o.Namespaces, ",") {
