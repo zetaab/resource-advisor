@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 
+	"github.com/olekukonko/tablewriter"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -26,6 +28,7 @@ func Run(o *Options) error {
 		return err
 	}
 
+	data := [][]string{}
 	for _, deployment := range deployments.Items {
 		selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
 		if err != nil {
@@ -86,23 +89,46 @@ func Run(o *Options) error {
 			RequestMem: make(map[string]float64),
 		}
 		for k, v := range totalRequestCPU {
-			final.RequestCPU[k] = math.Ceil(float64Average(v)*10)/10
+			final.RequestCPU[k] = math.Ceil(float64Average(v)*10) / 10
 		}
 		for k, v := range totalRequestMem {
-			final.RequestMem[k] = math.Ceil(float64Average(v)/100)*100
+			final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
 		}
 		for k, v := range totalLimitCPU {
-			final.LimitCPU[k] = math.Ceil(float64Average(v)*10)/10
+			final.LimitCPU[k] = math.Ceil(float64Average(v)*10) / 10
 		}
 		for k, v := range totalLimitMem {
-			final.LimitMem[k] = math.Ceil(float64Average(v)/100)*100
+			final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
 		}
 
-		analyzeDeployment(deployment, final)
+		data = analyzeDeployment(data, deployment, final)
 	}
+
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Namespace", "Deployment", "Container", "Request CPU", "Request MEM", "Limit CPU", "Limit MEM"})
+	for _, v := range data {
+		table.Append(v)
+	}
+	table.Render()
+
 	return nil
 }
 
-func analyzeDeployment(deployment appsv1.Deployment, finalMetrics prometheusMetrics) {
-	fmt.Printf("%+v %+v\n", deployment.Name, finalMetrics)
+func analyzeDeployment(data [][]string, deployment appsv1.Deployment, finalMetrics prometheusMetrics) [][]string {
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		reqCpu, _ := finalMetrics.RequestCPU[container.Name]
+		reqMem, _ := finalMetrics.RequestMem[container.Name]
+		limCpu, _ := finalMetrics.LimitCPU[container.Name]
+		limMem, _ := finalMetrics.LimitMem[container.Name]
+		data = append(data, []string{
+			"default",
+			deployment.Name,
+			container.Name,
+			fmt.Sprintf("%dm", int(reqCpu*1000)),
+			fmt.Sprintf("%dMi", int(reqMem)),
+			fmt.Sprintf("%dm", int(limCpu*1000)),
+			fmt.Sprintf("%dMi", int(limMem)),
+		})
+	}
+	return data
 }
