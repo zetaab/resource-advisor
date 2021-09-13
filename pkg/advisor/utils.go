@@ -67,15 +67,18 @@ func queryStatistic(ctx context.Context, client *promClient, request string, now
 		sampleArray = append(sampleArray, sample)
 	}
 
+	highest := float64(0.00)
 	for _, item := range sampleArray {
 		containerName := ""
 		for k, v := range item.Metric {
 			if k == "container" {
 				containerName = string(v)
-				break
 			}
 		}
-		output[containerName] = float64(item.Value)
+		if float64(item.Value) > highest {
+			output[containerName] = float64(item.Value)
+			highest = float64(item.Value)
+		}
 	}
 
 	return output, nil
@@ -115,6 +118,16 @@ func float64Average(input []float64) float64 {
 		sum += value
 	}
 	return sum / float64(len(input))
+}
+
+func float64Peak(input []float64) float64 {
+	highest := float64(0.00)
+	for _, value := range input {
+		if value > highest {
+			highest = value
+		}
+	}
+	return highest
 }
 
 func findReplicaset(replicasets *appsv1.ReplicaSetList, dep appsv1.Deployment) (*appsv1.ReplicaSet, error) {
@@ -270,21 +283,22 @@ func (o *Options) findPods(ctx context.Context, namespace string, selector strin
 			totalLimitMem[k] = append(totalLimitMem[k], v)
 		}
 	}
+
 	for k, v := range totalRequestCPU {
 		scale := 10
-		value := float64Average(v)
+		value := float64Peak(v)
 		final.RequestCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
 	}
 	for k, v := range totalRequestMem {
-		final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
+		final.RequestMem[k] = math.Ceil(float64Peak(v)/100) * 100
 	}
 	for k, v := range totalLimitCPU {
 		scale := 10
-		value := float64Average(v)
+		value := float64Peak(v)
 		final.LimitCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
 	}
 	for k, v := range totalLimitMem {
-		final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
+		final.LimitMem[k] = math.Ceil(float64Peak(v)/100) * 100
 	}
 	return final, nil
 }
