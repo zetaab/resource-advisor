@@ -23,8 +23,8 @@ import (
 
 const (
 	promOperatorClusterURL = "/api/v1/namespaces/monitoring/services/prometheus-operated:web/proxy/"
-	podCPURequest          = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w])`
-	podCPULimit            = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_irate{pod="%s", container!=""}[1w]) * %s`
+	podCPURequest          = `quantile_over_time(%s, node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate{pod="%s", container!=""}[1w])`
+	podCPULimit            = `max_over_time(node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate{pod="%s", container!=""}[1w]) * %s`
 	podMemoryRequest       = `quantile_over_time(%s, container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024`
 	podMemoryLimit         = `(max_over_time(container_memory_working_set_bytes{pod="%s", container!=""}[1w]) / 1024 / 1024) * %s`
 	deploymentRevision     = "deployment.kubernetes.io/revision"
