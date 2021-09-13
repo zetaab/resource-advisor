@@ -3,6 +3,8 @@ package advisor
 import (
 	"net/http"
 	"net/url"
+
+	"k8s.io/client-go/kubernetes"
 )
 
 type Options struct {
@@ -10,6 +12,8 @@ type Options struct {
 	Namespaces     string
 	Quantile       string
 	LimitMargin    string
+	promClient     *promClient
+	client         *kubernetes.Clientset
 }
 
 type promClient struct {

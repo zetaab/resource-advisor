@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -16,6 +17,7 @@ import (
 	prommodel "github.com/prometheus/common/model"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -234,4 +236,61 @@ func ByteCountSI(b int64) string {
 	}
 	return fmt.Sprintf("%.1f %cB",
 		float64(b)/float64(div), "kMGTPE"[exp])
+}
+
+func (o *Options) findPods(ctx context.Context, namespace string, selector string) (prometheusMetrics, error) {
+	final := prometheusMetrics{
+		LimitCPU:   make(map[string]float64),
+		LimitMem:   make(map[string]float64),
+		RequestCPU: make(map[string]float64),
+		RequestMem: make(map[string]float64),
+	}
+
+	pods, err := o.client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return final, err
+	}
+
+	totalLimitCPU := make(map[string][]float64)
+	totalLimitMem := make(map[string][]float64)
+	totalRequestCPU := make(map[string][]float64)
+	totalRequestMem := make(map[string][]float64)
+
+	for _, pod := range pods.Items {
+		output, err := o.queryPrometheusForPod(ctx, o.promClient, pod)
+		if err != nil {
+			return final, err
+		}
+		for k, v := range output.RequestCPU {
+			totalRequestCPU[k] = append(totalRequestCPU[k], v)
+		}
+		for k, v := range output.RequestMem {
+			totalRequestMem[k] = append(totalRequestMem[k], v)
+		}
+		for k, v := range output.LimitCPU {
+			totalLimitCPU[k] = append(totalLimitCPU[k], v)
+		}
+		for k, v := range output.LimitMem {
+			totalLimitMem[k] = append(totalLimitMem[k], v)
+		}
+	}
+	for k, v := range totalRequestCPU {
+		scale := 10
+		value := float64Average(v)
+		final.RequestCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
+	}
+	for k, v := range totalRequestMem {
+		final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
+	}
+	for k, v := range totalLimitCPU {
+		scale := 10
+		value := float64Average(v)
+		final.LimitCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
+	}
+	for k, v := range totalLimitMem {
+		final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
+	}
+	return final, nil
 }

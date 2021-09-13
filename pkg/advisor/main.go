@@ -3,7 +3,6 @@ package advisor
 import (
 	"context"
 	"fmt"
-	"math"
 	"os"
 	"strings"
 
@@ -15,12 +14,13 @@ import (
 )
 
 func Run(o *Options) error {
-	client, err := newClientSet()
+	var err error
+	o.client, err = newClientSet()
 	if err != nil {
 		return err
 	}
 
-	promClient, err := makePrometheusClientForCluster()
+	o.promClient, err = makePrometheusClientForCluster()
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func Run(o *Options) error {
 	totalCPUSave := float64(0.00)
 	totalMemSave := float64(0.00)
 	for _, namespace := range strings.Split(o.Namespaces, ",") {
-		deployments, err := client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
+		deployments, err := o.client.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -52,7 +52,7 @@ func Run(o *Options) error {
 				return err
 			}
 
-			replicasets, err := client.AppsV1().ReplicaSets(deployment.Namespace).List(ctx, metav1.ListOptions{
+			replicasets, err := o.client.AppsV1().ReplicaSets(deployment.Namespace).List(ctx, metav1.ListOptions{
 				LabelSelector: selector.String(),
 			})
 			if err != nil {
@@ -69,57 +69,9 @@ func Run(o *Options) error {
 				return err
 			}
 
-			pods, err := client.CoreV1().Pods(deployment.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: selector.String(),
-			})
+			final, err := o.findPods(ctx, deployment.Namespace, selector.String())
 			if err != nil {
 				return err
-			}
-
-			totalLimitCPU := make(map[string][]float64)
-			totalLimitMem := make(map[string][]float64)
-			totalRequestCPU := make(map[string][]float64)
-			totalRequestMem := make(map[string][]float64)
-
-			for _, pod := range pods.Items {
-				output, err := o.queryPrometheusForPod(ctx, promClient, pod)
-				if err != nil {
-					return err
-				}
-				for k, v := range output.RequestCPU {
-					totalRequestCPU[k] = append(totalRequestCPU[k], v)
-				}
-				for k, v := range output.RequestMem {
-					totalRequestMem[k] = append(totalRequestMem[k], v)
-				}
-				for k, v := range output.LimitCPU {
-					totalLimitCPU[k] = append(totalLimitCPU[k], v)
-				}
-				for k, v := range output.LimitMem {
-					totalLimitMem[k] = append(totalLimitMem[k], v)
-				}
-			}
-			final := prometheusMetrics{
-				LimitCPU:   make(map[string]float64),
-				LimitMem:   make(map[string]float64),
-				RequestCPU: make(map[string]float64),
-				RequestMem: make(map[string]float64),
-			}
-			for k, v := range totalRequestCPU {
-				scale := 10
-				value := float64Average(v)
-				final.RequestCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalRequestMem {
-				final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
-			}
-			for k, v := range totalLimitCPU {
-				scale := 10
-				value := float64Average(v)
-				final.LimitCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalLimitMem {
-				final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
 			}
 
 			cpuSave := float64(0.00)
@@ -129,7 +81,7 @@ func Run(o *Options) error {
 			totalMemSave += memSave
 		}
 
-		statefulSets, err := client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
+		statefulSets, err := o.client.AppsV1().StatefulSets(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -140,57 +92,9 @@ func Run(o *Options) error {
 				return err
 			}
 
-			pods, err := client.CoreV1().Pods(statefulSet.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: selector.String(),
-			})
+			final, err := o.findPods(ctx, statefulSet.Namespace, selector.String())
 			if err != nil {
 				return err
-			}
-
-			totalLimitCPU := make(map[string][]float64)
-			totalLimitMem := make(map[string][]float64)
-			totalRequestCPU := make(map[string][]float64)
-			totalRequestMem := make(map[string][]float64)
-
-			for _, pod := range pods.Items {
-				output, err := o.queryPrometheusForPod(ctx, promClient, pod)
-				if err != nil {
-					return err
-				}
-				for k, v := range output.RequestCPU {
-					totalRequestCPU[k] = append(totalRequestCPU[k], v)
-				}
-				for k, v := range output.RequestMem {
-					totalRequestMem[k] = append(totalRequestMem[k], v)
-				}
-				for k, v := range output.LimitCPU {
-					totalLimitCPU[k] = append(totalLimitCPU[k], v)
-				}
-				for k, v := range output.LimitMem {
-					totalLimitMem[k] = append(totalLimitMem[k], v)
-				}
-			}
-			final := prometheusMetrics{
-				LimitCPU:   make(map[string]float64),
-				LimitMem:   make(map[string]float64),
-				RequestCPU: make(map[string]float64),
-				RequestMem: make(map[string]float64),
-			}
-			for k, v := range totalRequestCPU {
-				scale := 10
-				value := float64Average(v)
-				final.RequestCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalRequestMem {
-				final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
-			}
-			for k, v := range totalLimitCPU {
-				scale := 10
-				value := float64Average(v)
-				final.LimitCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalLimitMem {
-				final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
 			}
 
 			cpuSave := float64(0.00)
@@ -200,7 +104,7 @@ func Run(o *Options) error {
 			totalMemSave += memSave
 		}
 
-		daemonSets, err := client.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
+		daemonSets, err := o.client.AppsV1().DaemonSets(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -211,57 +115,9 @@ func Run(o *Options) error {
 				return err
 			}
 
-			pods, err := client.CoreV1().Pods(daemonSets.Namespace).List(ctx, metav1.ListOptions{
-				LabelSelector: selector.String(),
-			})
+			final, err := o.findPods(ctx, daemonSets.Namespace, selector.String())
 			if err != nil {
 				return err
-			}
-
-			totalLimitCPU := make(map[string][]float64)
-			totalLimitMem := make(map[string][]float64)
-			totalRequestCPU := make(map[string][]float64)
-			totalRequestMem := make(map[string][]float64)
-
-			for _, pod := range pods.Items {
-				output, err := o.queryPrometheusForPod(ctx, promClient, pod)
-				if err != nil {
-					return err
-				}
-				for k, v := range output.RequestCPU {
-					totalRequestCPU[k] = append(totalRequestCPU[k], v)
-				}
-				for k, v := range output.RequestMem {
-					totalRequestMem[k] = append(totalRequestMem[k], v)
-				}
-				for k, v := range output.LimitCPU {
-					totalLimitCPU[k] = append(totalLimitCPU[k], v)
-				}
-				for k, v := range output.LimitMem {
-					totalLimitMem[k] = append(totalLimitMem[k], v)
-				}
-			}
-			final := prometheusMetrics{
-				LimitCPU:   make(map[string]float64),
-				LimitMem:   make(map[string]float64),
-				RequestCPU: make(map[string]float64),
-				RequestMem: make(map[string]float64),
-			}
-			for k, v := range totalRequestCPU {
-				scale := 10
-				value := float64Average(v)
-				final.RequestCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalRequestMem {
-				final.RequestMem[k] = math.Ceil(float64Average(v)/100) * 100
-			}
-			for k, v := range totalLimitCPU {
-				scale := 10
-				value := float64Average(v)
-				final.LimitCPU[k] = math.Ceil(value*float64(scale)) / float64(scale)
-			}
-			for k, v := range totalLimitMem {
-				final.LimitMem[k] = math.Ceil(float64Average(v)/100) * 100
 			}
 
 			cpuSave := float64(0.00)
