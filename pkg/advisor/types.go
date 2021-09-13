@@ -18,7 +18,7 @@ type Options struct {
 
 type promClient struct {
 	endpoint *url.URL
-	client   http.Client
+	client   *http.Client
 }
 
 type suggestion struct {

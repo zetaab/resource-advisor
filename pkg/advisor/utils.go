@@ -2,8 +2,6 @@ package advisor
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"io/ioutil"
 	"math"
@@ -140,22 +138,18 @@ func makePrometheusClientForCluster() (*promClient, error) {
 	}
 
 	promurl := fmt.Sprintf("%s%s", config.Host, promOperatorClusterURL)
-	tlsConf := config.TLSClientConfig
-	cert, err := tls.X509KeyPair(tlsConf.CertData, tlsConf.KeyData)
+	transport, err := rest.TransportFor(config)
 	if err != nil {
 		return nil, err
 	}
 
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(tlsConf.CAData)
-
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caCertPool,
+	var httpClient *http.Client
+	if transport != http.DefaultTransport {
+		httpClient = &http.Client{Transport: transport}
+		if config.Timeout > 0 {
+			httpClient.Timeout = config.Timeout
+		}
 	}
-	tlsConfig.BuildNameToCertificate()
-	transport := &http.Transport{TLSClientConfig: tlsConfig}
-	client := http.Client{Transport: transport}
 
 	u, err := url.Parse(promurl)
 	if err != nil {
@@ -165,7 +159,7 @@ func makePrometheusClientForCluster() (*promClient, error) {
 
 	return &promClient{
 		endpoint: u,
-		client:   client,
+		client:   httpClient,
 	}, nil
 	return nil, nil
 }
