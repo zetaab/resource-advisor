@@ -24,18 +24,35 @@ func Run(o *Options) error {
 	if err != nil {
 		return err
 	}
+	ctx := context.Background()
 
-	if o.NamespaceInput == "" {
+	if o.NamespaceSelector != "" {
+		namespaces, err := o.client.CoreV1().Namespaces().List(ctx, metav1.ListOptions{
+			LabelSelector: o.NamespaceSelector,
+		})
+		if err != nil {
+			return err
+		}
+
+		strNamespace := []string{}
+		for _, name := range namespaces.Items {
+			strNamespace = append(strNamespace, name.Name)
+		}
+		o.Namespaces = strings.Join(strNamespace, ",")
+	} else if o.NamespaceInput != "" {
+		o.Namespaces = o.NamespaceInput
+	} else {
 		_, namespace, err := findConfig()
 		if err != nil {
 			return err
 		}
 		o.Namespaces = namespace
-	} else {
-		o.Namespaces = o.NamespaceInput
 	}
 
-	ctx := context.Background()
+	fmt.Printf("Namespaces: %s\n", o.Namespaces)
+	fmt.Printf("Quantile: %s\n", o.Quantile)
+	fmt.Printf("Limit margin: %s\n", o.LimitMargin)
+
 	data := [][]string{}
 
 	totalCPUSave := float64(0.00)

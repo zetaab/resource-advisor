@@ -8,12 +8,13 @@ import (
 )
 
 type Options struct {
-	NamespaceInput string
-	Namespaces     string
-	Quantile       string
-	LimitMargin    string
-	promClient     *promClient
-	client         *kubernetes.Clientset
+	NamespaceInput    string
+	NamespaceSelector string
+	Namespaces        string
+	Quantile          string
+	LimitMargin       string
+	promClient        *promClient
+	client            *kubernetes.Clientset
 }
 
 type promClient struct {
